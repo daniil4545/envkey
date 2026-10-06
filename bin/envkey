@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""envkey - work with a project's .env without printing secret values.
+
+  envkey ls                         names; values of public variables only
+  envkey run -- <command>           run with .env in the environment, secrets masked in output
+  envkey set NAME                   secret: stdin if piped, else hidden prompt or macOS dialog
+  envkey set --public NAME VALUE    public variable
+  envkey set --public NAME          mark an existing variable public, keep its value
+  envkey rm NAME
+  envkey mv OLD NEW
+
+Options: -C DIR  start the .env search in DIR instead of the current directory.
+
+The file is the nearest .env from DIR up to the git root. A variable is public only when
+the line above it is "# public"; everything else is a secret. Values never appear in
+arguments or messages of envkey itself.
+"""
+
+import getpass
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+
+FILENAME = ".env"
+PUBLIC_MARK = "# public"
+MIN_MASK_LEN = 6
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LINE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<export>export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<rest>.*)$")
+COMMENT_RE = re.compile(r"(?:^|[ \t])#")
+FORBIDDEN = {"\n": "newline", "\r": "carriage return", "#": "'#'", "$": "'$'", "\\": "backslash"}
+
+
+class EnvError(Exception):
+    def __init__(self, message, code=2):
+        super().__init__(message)
+        self.code = code
+
+
+def git(directory, *args):
+    return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True)
+
+
+def find_file(directory):
+    """Nearest .env from DIR up to the git root (outside git: DIR only)."""
+    if not os.path.isdir(directory):
+        raise EnvError(f"no such directory: {directory}")
+    start = os.path.realpath(directory)
+    top = git(start, "rev-parse", "--show-toplevel").stdout.strip()
+    root = os.path.realpath(top) if top else start
+    current = start
+    while True:
+        candidate = os.path.join(current, FILENAME)
+        if os.path.isfile(candidate):
+            return candidate
+        if current == root or os.path.dirname(current) == current:
+            return None
+        current = os.path.dirname(current)
+
+
+def check_value(value):
+    """Reject values that make, docker compose and envkey would read differently."""
+    if value == "":
+        raise EnvError("value is empty")
+    for char, label in FORBIDDEN.items():
+        if char in value:
+            raise EnvError(f"value contains {label}, which .env readers parse differently")
+    if value != value.strip():
+        raise EnvError("value has leading or trailing whitespace")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        raise EnvError("value is wrapped in quotes")
+
+
+def parse_value(rest):
+    comment = COMMENT_RE.search(rest)
+    if comment:
+        rest = rest[:comment.start()]
+    value = rest.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+class Line:
+    def __init__(self, raw):
+        self.raw = raw
+        self.name = self.value = None
+        self.prefix = ""
+        body = raw.rstrip("\n")
+        self.eol = raw[len(body):]
+        if body.endswith("\r"):
+            body, self.eol = body[:-1], "\r" + self.eol
+        self.body = body
+        self.is_mark = body == PUBLIC_MARK
+
+
+class EnvFile:
+    """Whole file; edits touch only the affected lines, the rest stays byte for byte."""
+
+    def __init__(self, path, text=""):
+        self.path = path
+        self.lines = [Line(raw) for raw in re.findall(r"[^\n]*\n|[^\n]+", text)]
+        for number, line in enumerate(self.lines, start=1):
+            stripped = line.body.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = LINE_RE.match(line.body)
+            if not match:
+                raise EnvError(f"{path}: line {number} is not NAME=value")
+            line.name = match.group("name")
+            line.prefix = match.group("indent") + (match.group("export") or "")
+            line.value = parse_value(match.group("rest"))
+
+    @classmethod
+    def load(cls, path):
+        try:
+            with open(path, "rb") as handle:
+                return cls(path, handle.read().decode("utf-8", "surrogateescape"))
+        except OSError as exc:
+            raise EnvError(f"cannot read {path}: {exc.strerror}") from None
+
+    def is_public(self, index):
+        return index > 0 and self.lines[index - 1].is_mark
+
+    def variables(self):
+        """Name -> (value, public); the last line of a duplicated name wins, as in make."""
+        result = {}
+        for index, line in enumerate(self.lines):
+            if line.name:
+                result[line.name] = (line.value, self.is_public(index))
+        return result
+
+    def secrets(self):
+        return [(line.value, line.name) for i, line in enumerate(self.lines)
+                if line.name and line.value and not self.is_public(i)]
+
+    def find(self, name):
+        found = [i for i, line in enumerate(self.lines) if line.name == name]
+        if len(found) > 1:
+            raise EnvError(f"{name} is defined on lines {', '.join(str(i + 1) for i in found)}; fix by hand")
+        return found[0] if found else None
+
+    def eol(self):
+        return next((line.eol for line in reversed(self.lines) if line.eol), "\n")
+
+    def set(self, name, value, public):
+        index = self.find(name)
+        if value is None:
+            if index is None:
+                raise EnvError(f"{name} is not in the file")
+            value = self.lines[index].value
+        else:
+            check_value(value)
+        if index is not None:
+            line = self.lines[index]
+            line.raw = f"{line.prefix}{name}={value}{line.eol}"
+            line.value = value
+            marked = self.is_public(index)
+            if marked and not public:
+                del self.lines[index - 1]
+            elif public and not marked:
+                self.lines.insert(index, Line(PUBLIC_MARK + self.eol()))
+            return
+        eol = self.eol()
+        if self.lines and not self.lines[-1].eol:
+            self.lines[-1].raw += eol
+            self.lines[-1].eol = eol
+        if self.lines and self.lines[-1].is_mark:
+            self.lines.append(Line(eol))
+        if public:
+            self.lines.append(Line(PUBLIC_MARK + eol))
+        line = Line(f"{name}={value}{eol}")
+        line.name, line.value = name, value
+        self.lines.append(line)
+
+    def remove(self, name):
+        index = self.find(name)
+        if index is None:
+            raise EnvError(f"{name} is not in the file")
+        start = index - 1 if self.is_public(index) else index
+        del self.lines[start:index + 1]
+
+    def rename(self, old, new):
+        index = self.find(old)
+        if index is None:
+            raise EnvError(f"{old} is not in the file")
+        if self.find(new) is not None:
+            raise EnvError(f"{new} is already in the file")
+        line = self.lines[index]
+        line.raw = line.prefix + new + line.raw[len(line.prefix) + len(old):]
+        line.name = new
+
+    def save(self):
+        handle, temp = tempfile.mkstemp(dir=os.path.dirname(self.path), prefix=".envkey-")
+        try:
+            os.fchmod(handle, 0o600)
+            with os.fdopen(handle, "wb") as out:
+                out.write("".join(line.raw for line in self.lines).encode("utf-8", "surrogateescape"))
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temp, self.path)
+        except OSError as exc:
+            if os.path.exists(temp):
+                os.unlink(temp)
+            raise EnvError(f"cannot write {self.path}: {exc.strerror}", code=1) from None
+
+
+def open_existing(directory):
+    path = find_file(directory)
+    if not path:
+        raise EnvError(f"no {FILENAME} in {os.path.realpath(directory)} or above it up to the git root")
+    return EnvFile.load(path)
+
+
+def open_for_write(directory):
+    """Existing or new file; it must be git-ignored, otherwise the next push leaks it."""
+    path = find_file(directory) or os.path.join(os.path.realpath(directory), FILENAME)
+    if git(os.path.dirname(path), "check-ignore", "-q", path).returncode == 1:
+        raise EnvError(f"{path} is not git-ignored; add {FILENAME} to .gitignore first")
+    return EnvFile.load(path) if os.path.exists(path) else EnvFile(path)
+
+
+def ask_value(name, path):
+    """Secret value without a terminal echo: stdin, hidden prompt, or a macOS dialog."""
+    if not sys.stdin.isatty():
+        raw = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+        if raw:
+            return raw[:-2] if raw.endswith("\r\n") else raw.removesuffix("\n")
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        return getpass.getpass(f"Value for {name} (hidden): ")
+    return ask_dialog(name, path)
+
+
+def ask_dialog(name, path):
+    if sys.platform != "darwin":
+        raise EnvError("no terminal and no dialog on this OS; pipe the value: ... | envkey set NAME")
+    where = path.replace("\\", "\\\\").replace('"', '\\"')
+    script = (f'display dialog "Enter the value for {name}\\n{where}" '
+              'with title "envkey" default answer "" with hidden answer')
+    # The value comes back on stdout of osascript, never through arguments.
+    result = subprocess.run(["osascript", "-e", script, "-e", "text returned of result"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        raise EnvError("input cancelled", code=1)
+    return result.stdout.removesuffix("\n")
+
+
+def run(directory, command):
+    if not command:
+        raise EnvError("usage: envkey run -- <command> [args]")
+    env_file = open_existing(directory)
+    env = os.environ.copy()
+    env.update({name: value for name, (value, _) in env_file.variables().items()})
+    if sys.stdout.isatty():
+        try:
+            os.execvpe(command[0], command, env)
+        except OSError as exc:
+            exec_failed(command[0], exc)
+    masks = sorted({pair for pair in env_file.secrets() if len(pair[0]) >= MIN_MASK_LEN},
+                   key=lambda pair: len(pair[0]), reverse=True)
+    try:
+        process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        exec_failed(command[0], exc)
+    threads = [threading.Thread(target=pump, args=(process.stdout, sys.stdout, masks)),
+               threading.Thread(target=pump, args=(process.stderr, sys.stderr, masks))]
+    for thread in threads:
+        thread.start()
+    code = process.wait()
+    for thread in threads:
+        thread.join()
+    sys.exit(code)
+
+
+def exec_failed(name, exc):
+    print(f"envkey: cannot run {name}: {exc.strerror}", file=sys.stderr)
+    sys.exit(127 if isinstance(exc, FileNotFoundError) else 126)
+
+
+def pump(source, sink, masks):
+    for line in iter(source.readline, b""):
+        text = line.decode("utf-8", "replace")
+        for value, name in masks:
+            text = text.replace(value, f"[hidden {name}]")
+        sink.write(text)
+        sink.flush()
+    source.close()
+
+
+def require_name(name):
+    if not NAME_RE.match(name):
+        raise EnvError(f"bad name {name!r}: use [A-Za-z_][A-Za-z0-9_]*")
+
+
+def main(argv):
+    directory = "."
+    if argv[:1] == ["-C"]:
+        if len(argv) < 2:
+            raise EnvError("-C needs a directory")
+        directory, argv = argv[1], argv[2:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    action, args = argv[0], argv[1:]
+    if action == "run":
+        run(directory, args[1:] if args[:1] == ["--"] else args)
+    elif action == "ls":
+        env_file = open_existing(directory)
+        print(f"envkey: {env_file.path}", file=sys.stderr)
+        for name, (value, public) in env_file.variables().items():
+            print(f"{name}\t{value if public else '<secret>'}")
+    elif action == "set":
+        public = "--public" in args
+        args = [a for a in args if a != "--public"]
+        if not args or len(args) > 2 or (len(args) == 2 and not public):
+            raise EnvError("usage: envkey set NAME | envkey set --public NAME [VALUE]")
+        require_name(args[0])
+        env_file = open_for_write(directory)
+        if len(args) == 2:
+            value = args[1]
+        elif public:
+            value = None
+        else:
+            value = ask_value(args[0], env_file.path)
+        env_file.set(args[0], value, public)
+        env_file.save()
+        print(f"envkey: {args[0]} saved ({'public' if public else 'secret'})", file=sys.stderr)
+    elif action in ("rm", "mv"):
+        if len(args) != (1 if action == "rm" else 2):
+            raise EnvError("usage: envkey rm NAME | envkey mv OLD NEW")
+        for name in args:
+            require_name(name)
+        env_file = open_existing(directory)
+        env_file.remove(args[0]) if action == "rm" else env_file.rename(*args)
+        env_file.save()
+        print(f"envkey: {' -> '.join(args) if action == 'mv' else args[0] + ' removed'}", file=sys.stderr)
+    else:
+        raise EnvError(f"unknown command {action!r}; see envkey --help")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except EnvError as error:
+        print(f"envkey: {error}", file=sys.stderr)
+        sys.exit(error.code)

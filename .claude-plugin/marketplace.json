@@ -1,0 +1,17 @@
+{
+  "name": "envkey",
+  "description": "envkey plugin for Claude Code",
+  "owner": {
+    "name": "Daniil Sukhar"
+  },
+  "plugins": [
+    {
+      "name": "envkey",
+      "description": "Work with a project's .env without the agent reading secret values",
+      "source": "./",
+      "version": "0.1.0",
+      "category": "security",
+      "tags": ["env", "dotenv", "secrets"]
+    }
+  ]
+}

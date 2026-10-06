@@ -1,0 +1,11 @@
+{
+  "name": "envkey",
+  "version": "0.1.0",
+  "description": "Gives Claude Code hands for a project's .env: list, use, add, rename and remove variables without the agent ever reading secret values",
+  "author": {
+    "name": "Daniil Sukhar"
+  },
+  "repository": "https://github.com/daniil4545/envkey",
+  "license": "MIT",
+  "keywords": ["env", "dotenv", "secrets"]
+}

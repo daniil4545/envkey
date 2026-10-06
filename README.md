@@ -1,65 +1,48 @@
-# withkey
+# envkey
 
-Запуск команд с секретами в окружении процесса так, чтобы значения не попадали в вывод, журналы и
-аргументы. Для macOS: ключи в `.env` проекта или в Keychain, работа из терминала и из-под
-AI-агента, который не должен видеть значений.
+A Claude Code plugin that gives the agent hands for a project's `.env`: it lists, uses, adds,
+renames and removes variables, and never reads secret values.
 
-## Стадия
+## Install
 
-Рабочий инструмент: запуск с маской вывода, список, запись, удаление и переименование ключей в `.env`,
-ключи Keychain, защищённый режим `--prod` через sudo.
+```sh
+claude plugin marketplace add daniil4545/envkey
+claude plugin install envkey@envkey
+```
 
-## Быстрый старт
+Restart Claude Code. Nothing to configure: the agent learns the tool from the plugin's skill.
 
-Требования: macOS, Python 3, git. Сторонних зависимостей нет.
+Requirements: macOS, Python 3.9+, git.
 
-1. `git clone` репозитория.
-2. `make install` - ссылки на команды в `~/bin` (другой каталог - `make install PREFIX=<путь>`).
-3. `keyset -f . --public LOG_LEVEL debug` - первая переменная в `.env` текущего каталога.
-4. `withkey -f . -- sh -c 'echo $LOG_LEVEL' | cat` - печатает `debug`.
+## What the agent gets
 
-Тесты: `make test`.
-
-## Команды
-
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `withkey -f DIR [префикс...] -- cmd` | значения `.env` и Keychain в окружение `cmd`; секреты в выводе заменяются на `[скрыто ИМЯ]` |
-| `withkey префикс... -- cmd` | то же только из Keychain |
-| `keyls -f DIR` | имена; значения только у публичных, у прочих `<секрет>` |
-| `keyls [префикс]` | записи Keychain: путь и имя |
-| `keyset -f DIR ИМЯ` | секрет в `.env`: скрытый ввод в терминале или stdin, значения нет в аргументах |
-| `keyset -f DIR --public ИМЯ значение` | публичная переменная |
-| `keyset путь ИМЯ` | секрет в Keychain, путь `контекст[/проект]/сервис` |
-| `keyset -f DIR --from-keychain путь` | копия записей Keychain в `.env`, печатает только имена |
-| `keydel -f DIR ИМЯ`, `keymv -f DIR СТАРОЕ НОВОЕ` | удалить, переименовать |
+| `envkey ls` | variable names; values only for public ones, `<secret>` for the rest |
+| `envkey run -- <cmd>` | runs `<cmd>` with `.env` in its environment; secrets in the output become `[hidden NAME]` |
+| `envkey set --public NAME VALUE` | adds or changes a public variable |
+| `envkey set NAME` | stores a secret: from stdin, or the user types it into a hidden-input macOS dialog |
+| `envkey rm NAME`, `envkey mv OLD NEW` | removes, renames |
 
-Файл - ближайший `.env` от `DIR` вверх до корня git-репозитория; путь к файлу в команде не пишется.
-Формат - обычный dotenv, его читают `make -include` и `docker compose`. Переменная публичная, только
-если строкой выше стоит `# public`; остальные считаются секретами. `keyset` пишет только в файл,
-который игнорирует git, права файла 0600.
+`-C DIR` before the command starts the search in another directory. The file is the nearest
+`.env` from there up to the git root. It stays a plain dotenv file that `make` and
+`docker compose` read as before.
 
-## Пределы
+A variable is public only when the line above it is `# public`. Everything else is a secret.
 
-- Маска ловит точное совпадение. Значение в изменённом виде (`printenv K | base64`) она пропустит:
-  это защита от случайной утечки, а не от того, кто сам пишет команду.
-- Файл `.env` открыт для чтения тем же пользователем. Закрыть его от агента - дело прав агента.
-- В терминале (stdout - tty) маски нет: команда запускается напрямую.
-- Значения короче 6 символов не маскируются.
+## What the user does
 
-## Конфигурация
+Only one thing, and only when the agent needs a secret it cannot get itself: type the value into
+the envkey dialog. The value goes into `.env` and never into the chat.
 
-| Переменная | Обязательна | Что задаёт |
-|---|---|---|
-| `WITHKEY_PROD_READER` | для `--prod` | путь к помощнику, который под `sudo` печатает `ИМЯ=значение` для `контекст/проект` |
+## Limits
 
-`withkey --prod контекст/проект -- cmd` вызывает `sudo $WITHKEY_PROD_READER контекст/проект`, подкладывает
-значения поверх Keychain и закрывает окно sudo (`sudo -k`). Помощник и правило sudoers пишет владелец
-машины: так боевые ключи читаются только с его подтверждением.
+- The plugin's hook stops the agent's file tools and shell commands from touching `.env` directly.
+  It catches mistakes, not a determined command: `.env` is a plain file readable by your user.
+- Masking matches exact values. A transformed value (`base64`) passes through.
+- Values shorter than 6 characters are not masked.
+- `envkey set` writes only to a file that git ignores, with mode 0600.
 
-## Документы
+## Development
 
-| Вопрос | Где ответ |
-|---|---|
-| правила для агента | `AGENTS.md` |
-| что и когда изменилось | `git log` |
+Tests: `python3 -m unittest discover -s tests -v`. Rules for agents: `AGENTS.md`.

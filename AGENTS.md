@@ -1,42 +1,40 @@
-# withkey - контекст AI-агентов
+# envkey - context for AI agents
 
-## Проект
+## Project
 
-Набор команд `withkey`, `keyls`, `keyset`, `keydel`, `keymv`: запуск с секретами в окружении процесса и
-маской вывода, ключи в `.env` проекта или в macOS Keychain. Описание и пределы - `README.md`.
+Claude Code plugin: the `envkey` command, a skill that teaches the agent to use it, and a
+PreToolUse hook that keeps the agent's tools away from `.env`. Scope is `.env` only: one tool,
+one job. User-facing description - `README.md`.
 
-## Принципы
+## Principles
 
-- Значение секрета не печатается и не передаётся аргументом ни одной командой набора.
-- Только stdlib Python: инструмент ставится ссылками, без pip.
-- Keychain и sudo в тестах подменяются; настоящие ключи тесты не трогают.
+- No envkey command prints a secret value or takes it as an argument.
+- Python stdlib only; the plugin works right after install, no pip.
+- Zero configuration for the user; the only user touch is typing a secret into the dialog.
 
-## Стек
+## Structure
 
-Python 3, stdlib. macOS: `security` для Keychain.
-
-## Структура
-
-| Файл | Что в нём |
+| Path | What it is |
 |---|---|
-| `withkey`, `keyls`, `keyset`, `keydel`, `keymv` | команды |
-| `envfile.py` | поиск, разбор и атомарная запись `.env` |
-| `keychain.py` | чтение и запись Keychain через `security` |
-| `test_keys.py` | тесты всех команд |
+| `bin/envkey` | the command; Claude Code puts plugin `bin/` on the agent's PATH |
+| `skills/envkey/SKILL.md` | when and how the agent uses envkey |
+| `hooks/hooks.json`, `hooks/guard.py` | PreToolUse guard against direct `.env` access |
+| `.claude-plugin/` | plugin manifest and single-plugin marketplace |
+| `tests/` | tests for the command and the guard |
 
-## Команды
+## Commands
 
-| Что | Команда |
+| What | Command |
 |---|---|
-| тесты | `make test` |
-| установка | `make install` |
+| tests | `python3 -m unittest discover -s tests -v` |
+| local plugin run | `claude --plugin-dir .` |
 
 ## Workflow
 
-- Ветка `main`, хостинг GitHub (приватный), CI нет.
+- Branch `main`, GitHub (private), no CI. Bump `version` in both manifests on release.
 
-## Критические инварианты
+## Critical invariants
 
-- Значение секрета не попадает в stdout, stderr и argv команд набора.
-- `keyset` не пишет в файл, который отслеживает git.
-- Код возврата дочерней команды сохраняется.
+- A secret value never reaches stdout, stderr or argv of envkey.
+- `envkey set` never writes to a file git does not ignore.
+- `envkey run` returns the child's exit code.
