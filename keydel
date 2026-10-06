@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Удалить переменную из файла ключей вместе с меткой `# public` над ней.
+
+keydel -f DIR ИМЯ
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import envfile  # noqa: E402
+
+USAGE = "использование: keydel -f DIR ИМЯ"
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        opts, rest = envfile.split_opts(argv, valued=("-f",))
+        if "-f" not in opts or len(rest) != 1:
+            raise envfile.EnvError(USAGE)
+        doc = envfile.open_for_edit(opts["-f"], create=False)
+        doc.delete(rest[0])
+        doc.save()
+    except envfile.EnvError as exc:
+        envfile.fail("keydel", str(exc), exc.code)
+    print(f"keydel: {rest[0]} удалён", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
