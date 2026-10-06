@@ -13,7 +13,7 @@
 
 ## Стек
 
-Python 3.9+, stdlib. macOS: `security` для Keychain.
+Python 3, stdlib. macOS: `security` для Keychain.
 
 ## Структура
 
