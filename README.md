@@ -67,7 +67,7 @@ flowchart LR
 |---|---|---|
 | Command | `bin/envkey` | reads and edits `.env`, runs commands with its values, masks secrets in output |
 | Skill | `skills/envkey/SKILL.md` | tells the agent to use envkey for anything about environment variables |
-| Hook | `hooks/guard.py` | checks every Read, Edit, Write, Grep and Bash call; refuses direct `.env` access |
+| Hook | `hooks/guard.py` | checks every Read, Edit, Write, Grep and Bash call; refuses direct access to `.env` and `<name>.env` |
 
 Claude Code puts the plugin's `bin/` directory on the agent's `PATH`, so `envkey` is available
 in every session without touching your shell.
@@ -111,7 +111,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
   call["Agent tool call"] --> guard["guard.py"]
-  guard --> q1{"Read, Edit or Write on .env?"}
+  guard --> q1{"Read, Edit or Write on an env file?"}
   q1 -->|yes| deny["Refuse, point to envkey"]
   q1 -->|no| q2{"Bash mentions .env outside envkey?"}
   q2 -->|yes| deny

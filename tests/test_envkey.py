@@ -158,14 +158,16 @@ class GuardTest(unittest.TestCase):
     def test_file_tools(self):
         self.assertTrue(self.decide("Read", file_path="/p/.env"))
         self.assertTrue(self.decide("Edit", file_path="/p/src/.env"))
+        self.assertTrue(self.decide("Read", file_path="/p/secrets/partner-db.env"))
         self.assertFalse(self.decide("Read", file_path="/p/.env.example"))
         self.assertFalse(self.decide("Read", file_path="/p/.gitignore"))
 
     def test_bash(self):
-        for command in ["cat .env", "grep TOKEN src/.env", "awk -F= '{print $2}' ./.env", "source .env"]:
+        for command in ["cat .env", "grep TOKEN src/.env", "awk -F= '{print $2}' ./.env", "source .env",
+                        "cat secrets/partner-db.env | sed 's/=.*PASS.*/=<>/'", "grep KEY accounts/anastasia.env"]:
             self.assertTrue(self.decide("Bash", command=command), command)
         for command in ["envkey ls", "envkey run -- make test", "cp .env.example tmp",
-                        "grep -q '^\\.env$' .gitignore", "ls -la"]:
+                        "grep -q '^\\.env$' .gitignore", "ls -la", "cat .envrc", "make env-check"]:
             self.assertFalse(self.decide("Bash", command=command), command)
 
 
