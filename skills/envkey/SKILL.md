@@ -20,7 +20,11 @@ The project's `.env` is handled only through `envkey`. Its secret values never e
 | remove, rename | `envkey rm NAME`, `envkey mv OLD NEW` |
 
 `-C DIR` before the command picks another directory: `envkey -C services/api ls`.
-The file is the nearest `.env` from that directory up to the git root.
+The file is the nearest `.env` from that directory up to the git root; in a git worktree the
+search goes on in the main tree. `-f FILE` picks an env file with another name:
+`envkey -f secrets/db.env run -- ./connect.sh`. Every env file, `.env` or `<name>.env`, goes
+through envkey only: no `cat`, `grep`, `source` or your own `sed` mask on it.
+A tool that needs the file path (`docker compose --env-file`) runs under `envkey run -- ...`.
 
 ## Rules
 

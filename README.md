@@ -185,7 +185,8 @@ comments and line endings stay byte for byte.
 | `envkey mv OLD NEW` | renames a variable, the mark stays with it |
 
 `-C DIR` before the command starts the search in another directory:
-`envkey -C services/api run -- make test`.
+`envkey -C services/api run -- make test`. `-f FILE` uses an env file with any name instead of
+the search: `envkey -f secrets/db.env ls`.
 
 ## 7. Setup and options
 
@@ -197,6 +198,9 @@ There is no configuration file. A few situations worth knowing:
 | No `.env` yet | the agent creates it with `envkey set`; `.env` must be in `.gitignore` first, the agent adds it with the Edit tool |
 | Several services with their own `.env` | `envkey -C <service dir> ...`; each command finds the nearest file |
 | Monorepo, `.env` at the root | works from any subdirectory: the search goes up to the git root |
+| Git worktree | the file stays in the main tree; envkey in a worktree finds it in the same place there |
+| File with another name (`db.env`, `accounts/a.env`) | `envkey -f <file> ...`; the hook blocks direct access to it as to `.env` |
+| Value with `#`, spaces or several lines | wrap it in double quotes in the file, as docker compose reads it; `envkey set` still accepts only plain values |
 | Stronger protection | add `"deny": ["Read(**/.env)"]` to `permissions` in your Claude Code settings; the hook already covers it, this adds a second layer |
 
 ## 8. Limits

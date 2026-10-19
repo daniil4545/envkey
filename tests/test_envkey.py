@@ -66,6 +66,57 @@ class EnvkeyTest(unittest.TestCase):
         os.remove(self.path())
         self.assertEqual(self.envkey("ls").returncode, 2)
 
+    def test_ls_marks_empty_secret(self):
+        self.write("EMPTY=\nTOKEN=x\n")
+        self.assertEqual(self.envkey("ls").stdout, "EMPTY\t<empty>\nTOKEN\t<secret>\n")
+
+    def test_named_file_with_f(self):
+        os.mkdir(self.path("secrets"))
+        self.write("*.env\n", "secrets/.gitignore")
+        self.write(f"DB_PASSWORD={SECRET}\n", "secrets/partner-db.env")
+        self.assertEqual(self.envkey("-f", "secrets/partner-db.env", "ls").stdout, "DB_PASSWORD\t<secret>\n")
+        result = self.envkey("-f", "secrets/partner-db.env", "run", "--", "sh", "-c", 'echo "$DB_PASSWORD"')
+        self.assertEqual(result.stdout, "[hidden DB_PASSWORD]\n")
+        self.assertEqual(self.envkey("-f", "secrets/partner-db.env", "set", "USER", stdin="partner_amo").returncode, 0)
+        self.assertEqual(self.envkey("-f", "secrets/missing.env", "ls").returncode, 2)
+
+    def test_worktree_finds_main_tree_file(self):
+        self.write(f"TOKEN={SECRET}\n")
+        os.makedirs(self.path("src"))
+        subprocess.run(["git", "-C", self.work, "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", self.work, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "init"], check=True)
+        tree = os.path.join(self.root, "wt")
+        subprocess.run(["git", "-C", self.work, "worktree", "add", "-q", tree], check=True)
+        result = self.envkey("ls", cwd=tree)
+        self.assertEqual(result.stdout, "TOKEN\t<secret>\n", result.stderr)
+
+    # parse
+
+    def test_parse_like_compose(self):
+        lines = ['A = 1', 'Q="a # b"', "S='x#y' # note", 'M="line1\nline2"', 'export E=5 # c']
+        self.write("".join(f"# public\n{line}\n" for line in lines))
+        result = self.envkey("run", "--", "sh", "-c", 'printf "%s|%s|%s|%s|%s" "$A" "$Q" "$S" "$M" "$E"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "1|a # b|x#y|line1\nline2|5")
+
+    def test_quoted_secret_with_hash_is_masked_whole(self):
+        self.write('Q="abc123 # def456"\n')
+        result = self.envkey("run", "--", "sh", "-c", 'echo "$Q"')
+        self.assertEqual(result.stdout, "[hidden Q]\n")
+
+    def test_multiline_secret_masked_line_by_line(self):
+        self.write('KEY="-----BEGIN-----\nABCDEFGHIJ\n-----END-----"\n')
+        result = self.envkey("run", "--", "sh", "-c", 'echo "$KEY"')
+        self.assertNotIn("ABCDEFGHIJ", result.stdout)
+        self.assertNotIn("BEGIN", result.stdout)
+
+    def test_bad_line_names_its_number(self):
+        self.write("A=1\nnot a variable\n")
+        result = self.envkey("ls")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("line 2", result.stderr)
+
     # run
 
     def test_run_masks_secrets_keeps_public_and_exit_code(self):
@@ -162,12 +213,22 @@ class GuardTest(unittest.TestCase):
         self.assertFalse(self.decide("Read", file_path="/p/.env.example"))
         self.assertFalse(self.decide("Read", file_path="/p/.gitignore"))
 
+    def test_grep_glob(self):
+        self.assertTrue(self.decide("Grep", pattern="KEY", glob="*.env"))
+        self.assertTrue(self.decide("Grep", pattern="KEY", path="/p", glob="**/.env"))
+        self.assertFalse(self.decide("Grep", pattern="KEY", glob="*.py"))
+
     def test_bash(self):
         for command in ["cat .env", "grep TOKEN src/.env", "awk -F= '{print $2}' ./.env", "source .env",
-                        "cat secrets/partner-db.env | sed 's/=.*PASS.*/=<>/'", "grep KEY accounts/anastasia.env"]:
+                        "cat secrets/partner-db.env | sed 's/=.*PASS.*/=<>/'", "grep KEY accounts/anastasia.env",
+                        "envkey ls; cat .env", "envkey ls && grep K src/.env", "envkey ls | cat - .env",
+                        "cat '.env'", "docker compose --env-file src/.env config"]:
             self.assertTrue(self.decide("Bash", command=command), command)
         for command in ["envkey ls", "envkey run -- make test", "cp .env.example tmp",
-                        "grep -q '^\\.env$' .gitignore", "ls -la", "cat .envrc", "make env-check"]:
+                        "grep -q '^\\.env$' .gitignore", "ls -la", "cat .envrc", "make env-check",
+                        "envkey -f secrets/partner-db.env ls", "envkey run -- docker compose --env-file .env up -d",
+                        "git commit -m 'fix: read .env through envkey'", "gh issue create -t 'move x.env' -b 'a b'",
+                        "node -e 'console.log(process.env)'", "git check-ignore -q .env && echo ok"]:
             self.assertFalse(self.decide("Bash", command=command), command)
 
 

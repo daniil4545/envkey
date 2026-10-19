@@ -9,9 +9,11 @@
   envkey rm NAME
   envkey mv OLD NEW
 
-Options: -C DIR  start the .env search in DIR instead of the current directory.
+Options: -C DIR   start the .env search in DIR instead of the current directory.
+         -f FILE  use this env file (any name, e.g. secrets/db.env) instead of the search.
 
-The file is the nearest .env from DIR up to the git root. A variable is public only when
+The file is the nearest .env from DIR up to the git root; in a linked git worktree the
+search continues in the same place of the main tree. A variable is public only when
 the line above it is "# public"; everything else is a secret. Values never appear in
 arguments or messages of envkey itself.
 """
@@ -28,7 +30,8 @@ FILENAME = ".env"
 PUBLIC_MARK = "# public"
 MIN_MASK_LEN = 6
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-LINE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<export>export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<rest>.*)$")
+LINE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<export>export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*="
+                     r"(?P<rest>.*)$", re.DOTALL)
 COMMENT_RE = re.compile(r"(?:^|[ \t])#")
 FORBIDDEN = {"\n": "newline", "\r": "carriage return", "#": "'#'", "$": "'$'", "\\": "backslash"}
 
@@ -43,13 +46,7 @@ def git(directory, *args):
     return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True)
 
 
-def find_file(directory):
-    """Nearest .env from DIR up to the git root (outside git: DIR only)."""
-    if not os.path.isdir(directory):
-        raise EnvError(f"no such directory: {directory}")
-    start = os.path.realpath(directory)
-    top = git(start, "rev-parse", "--show-toplevel").stdout.strip()
-    root = os.path.realpath(top) if top else start
+def search_up(start, root):
     current = start
     while True:
         candidate = os.path.join(current, FILENAME)
@@ -58,6 +55,29 @@ def find_file(directory):
         if current == root or os.path.dirname(current) == current:
             return None
         current = os.path.dirname(current)
+
+
+def main_tree(start, top):
+    """Main tree root of a linked worktree, else None: the env file lives in the main tree only."""
+    common = git(start, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+    if not common or os.path.basename(common) != ".git":
+        return None
+    main = os.path.realpath(os.path.dirname(common))
+    return main if main != top else None
+
+
+def find_file(directory):
+    """Nearest .env from DIR up to the git root (outside git: DIR only); a worktree falls back to the main tree."""
+    if not os.path.isdir(directory):
+        raise EnvError(f"no such directory: {directory}")
+    start = os.path.realpath(directory)
+    top = git(start, "rev-parse", "--show-toplevel").stdout.strip()
+    root = os.path.realpath(top) if top else start
+    found = search_up(start, root)
+    main = main_tree(start, root) if top and not found else None
+    if main:
+        return search_up(os.path.join(main, os.path.relpath(start, root)), main)
+    return found
 
 
 def check_value(value):
@@ -73,14 +93,23 @@ def check_value(value):
         raise EnvError("value is wrapped in quotes")
 
 
+def closing_quote(rest):
+    """Index of the quote closing a quoted value, -1 while it is open, None if unquoted."""
+    rest = rest.lstrip(" \t")
+    if not rest or rest[0] not in "\"'":
+        return None
+    return rest.find(rest[0], 1)
+
+
 def parse_value(rest):
+    """Value as docker compose reads it: quoted keeps '#' and newlines, unquoted ends at ' #'."""
+    end = closing_quote(rest)
+    if end:
+        return rest.lstrip(" \t")[1:end]
     comment = COMMENT_RE.search(rest)
     if comment:
         rest = rest[:comment.start()]
-    value = rest.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        value = value[1:-1]
-    return value
+    return rest.strip()
 
 
 class Line:
@@ -101,14 +130,27 @@ class EnvFile:
 
     def __init__(self, path, text=""):
         self.path = path
-        self.lines = [Line(raw) for raw in re.findall(r"[^\n]*\n|[^\n]+", text)]
-        for number, line in enumerate(self.lines, start=1):
+        self.lines = []
+        physical = re.findall(r"[^\n]*\n|[^\n]+", text)
+        number = 0
+        while number < len(physical):
+            start, raw = number + 1, physical[number]
+            number += 1
+            match = LINE_RE.match(raw.rstrip("\r\n"))
+            # A quoted value may span lines, as in docker compose: one Line holds all of them.
+            while match and closing_quote(match.group("rest")) == -1:
+                if number == len(physical):
+                    raise EnvError(f"{path}: line {start}: quote is never closed")
+                raw += physical[number]
+                number += 1
+                match = LINE_RE.match(raw.rstrip("\r\n"))
+            line = Line(raw)
+            self.lines.append(line)
             stripped = line.body.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            match = LINE_RE.match(line.body)
             if not match:
-                raise EnvError(f"{path}: line {number} is not NAME=value")
+                raise EnvError(f"{path}: line {start} is not NAME=value")
             line.name = match.group("name")
             line.prefix = match.group("indent") + (match.group("export") or "")
             line.value = parse_value(match.group("rest"))
@@ -133,8 +175,10 @@ class EnvFile:
         return result
 
     def secrets(self):
-        return [(line.value, line.name) for i, line in enumerate(self.lines)
-                if line.name and line.value and not self.is_public(i)]
+        """(piece, name) to mask; a multi-line value also by its lines, as output is pumped by lines."""
+        return [(piece, line.name) for i, line in enumerate(self.lines)
+                if line.name and line.value and not self.is_public(i)
+                for piece in [line.value, *line.value.split("\n")] if piece]
 
     def find(self, name):
         found = [i for i, line in enumerate(self.lines) if line.name == name]
@@ -207,18 +251,27 @@ class EnvFile:
             raise EnvError(f"cannot write {self.path}: {exc.strerror}", code=1) from None
 
 
-def open_existing(directory):
+def open_existing(directory, named=None):
+    if named:
+        if not os.path.isfile(named):
+            raise EnvError(f"no such file: {named}")
+        return EnvFile.load(os.path.realpath(named))
     path = find_file(directory)
     if not path:
         raise EnvError(f"no {FILENAME} in {os.path.realpath(directory)} or above it up to the git root")
     return EnvFile.load(path)
 
 
-def open_for_write(directory):
+def open_for_write(directory, named=None):
     """Existing or new file; it must be git-ignored, otherwise the next push leaks it."""
-    path = find_file(directory) or os.path.join(os.path.realpath(directory), FILENAME)
+    if named:
+        path = os.path.realpath(named)
+        if not os.path.isdir(os.path.dirname(path)):
+            raise EnvError(f"no such directory: {os.path.dirname(path)}")
+    else:
+        path = find_file(directory) or os.path.join(os.path.realpath(directory), FILENAME)
     if git(os.path.dirname(path), "check-ignore", "-q", path).returncode == 1:
-        raise EnvError(f"{path} is not git-ignored; add {FILENAME} to .gitignore first")
+        raise EnvError(f"{path} is not git-ignored; add {os.path.basename(path)} to .gitignore first")
     return EnvFile.load(path) if os.path.exists(path) else EnvFile(path)
 
 
@@ -247,10 +300,10 @@ def ask_dialog(name, path):
     return result.stdout.removesuffix("\n")
 
 
-def run(directory, command):
+def run(directory, named, command):
     if not command:
         raise EnvError("usage: envkey run -- <command> [args]")
-    env_file = open_existing(directory)
+    env_file = open_existing(directory, named)
     env = os.environ.copy()
     env.update({name: value for name, (value, _) in env_file.variables().items()})
     if sys.stdout.isatty():
@@ -295,29 +348,35 @@ def require_name(name):
 
 
 def main(argv):
-    directory = "."
-    if argv[:1] == ["-C"]:
+    directory, named = ".", None
+    while argv[:1] in (["-C"], ["-f"]):
         if len(argv) < 2:
-            raise EnvError("-C needs a directory")
-        directory, argv = argv[1], argv[2:]
+            raise EnvError(f"{argv[0]} needs a {'directory' if argv[0] == '-C' else 'file'}")
+        if argv[0] == "-C":
+            directory = argv[1]
+        else:
+            named = argv[1]
+        argv = argv[2:]
+    if named and not os.path.isabs(named):
+        named = os.path.join(directory, named)
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
         return
     action, args = argv[0], argv[1:]
     if action == "run":
-        run(directory, args[1:] if args[:1] == ["--"] else args)
+        run(directory, named, args[1:] if args[:1] == ["--"] else args)
     elif action == "ls":
-        env_file = open_existing(directory)
+        env_file = open_existing(directory, named)
         print(f"envkey: {env_file.path}", file=sys.stderr)
         for name, (value, public) in env_file.variables().items():
-            print(f"{name}\t{value if public else '<secret>'}")
+            print(f"{name}\t{value if public else '<secret>' if value else '<empty>'}")
     elif action == "set":
         public = "--public" in args
         args = [a for a in args if a != "--public"]
         if not args or len(args) > 2 or (len(args) == 2 and not public):
             raise EnvError("usage: envkey set NAME | envkey set --public NAME [VALUE]")
         require_name(args[0])
-        env_file = open_for_write(directory)
+        env_file = open_for_write(directory, named)
         if len(args) == 2:
             value = args[1]
         elif public:
@@ -332,7 +391,7 @@ def main(argv):
             raise EnvError("usage: envkey rm NAME | envkey mv OLD NEW")
         for name in args:
             require_name(name)
-        env_file = open_existing(directory)
+        env_file = open_existing(directory, named)
         env_file.remove(args[0]) if action == "rm" else env_file.rename(*args)
         env_file.save()
         print(f"envkey: {' -> '.join(args) if action == 'mv' else args[0] + ' removed'}", file=sys.stderr)
