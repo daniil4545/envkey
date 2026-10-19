@@ -12,11 +12,10 @@ import re
 import sys
 
 FILE_TOOLS = {"Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Grep"}
-# .env or <name>.env as a separate path element: not .env.example, not .envrc, not \.env in a regex
-ENV_TOKEN = re.compile(r"(?:^|[\s/'\"=<>(:])[\w.-]*\.env(?=$|[\s'\";|&)<>])")
-ENV_NAME = re.compile(r"[\w.-]*\.env")
-# Quoted text with a space is prose (commit message, issue title), not a path
-PROSE = re.compile(r"'[^']*\s[^']*'|\"[^\"]*\s[^\"]*\"")
+# .env, <name>.env, .env.local as a separate path element: not .env.example, not .envrc, not \.env in a regex
+NAME = r"[\w.-]*\.env(?:\.(?!(?:example|sample|template|dist)\b)[\w-]+)?"
+ENV_TOKEN = re.compile(r"(?:^|[\s/'\"=<>(:])" + NAME + r"(?=$|[\s'\";|&)<>])")
+ENV_NAME = re.compile(NAME)
 CODE_IDIOMS = re.compile(r"\b(?:process|import\.meta)\.env\b")
 # Every part of a chain is checked: "envkey ls; cat .env" must not pass as an envkey call
 SEGMENT_SPLIT = re.compile(r"[;&|\n`]|\$\(")
@@ -27,10 +26,70 @@ REASON = ("This project keeps env file values away from the agent. Use envkey: "
           "To ignore the file in git, edit .gitignore with the Edit tool.")
 
 
+def closing_paren(command, start):
+    depth = 1
+    for index in range(start, len(command)):
+        depth += {"(": 1, ")": -1}.get(command[index], 0)
+        if depth == 0:
+            return index
+    return len(command)
+
+
+def flatten(command):
+    """Command with quoted prose blanked, plus the code hidden in quotes to check on its own.
+
+    Quoted text with a space is prose (commit message, issue title), not a path. Code inside
+    quotes still runs: $(...) and `...` in double quotes, the argument of sh -c.
+    """
+    out, nested, index = [], [], 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\":
+            out.append(command[index:index + 2])
+            index += 2
+            continue
+        if char not in "'\"":
+            out.append(char)
+            index += 1
+            continue
+        text, index = [], index + 1
+        while index < len(command) and command[index] != char:
+            if char == '"' and command[index] == "\\":
+                text.append(command[index:index + 2])
+                index += 2
+            elif char == '"' and command.startswith("$(", index):
+                end = closing_paren(command, index + 2)
+                nested.append(command[index + 2:end])
+                text.append(" ")
+                index = end + 1
+            elif char == '"' and command[index] == "`":
+                end = command.find("`", index + 1)
+                end = len(command) if end < 0 else end
+                nested.append(command[index + 1:end])
+                text.append(" ")
+                index = end + 1
+            else:
+                text.append(command[index])
+                index += 1
+        index += 1
+        text = "".join(text)
+        before = "".join(out).split()
+        if before and before[-1] == "-c":
+            nested.append(text)
+            out.append("''")
+        elif re.search(r"\s", text):
+            out.append("''")
+        else:
+            out.append(char + text + char)
+    return "".join(out), nested
+
+
 def bash_blocked(command):
-    command = CODE_IDIOMS.sub("", PROSE.sub("''", command))
-    return any(ENV_TOKEN.search(part) and not part.strip().startswith(SAFE_STARTS)
-               for part in SEGMENT_SPLIT.split(command))
+    flat, nested = flatten(command)
+    flat = CODE_IDIOMS.sub("", flat)
+    return (any(ENV_TOKEN.search(part) and not part.strip().startswith(SAFE_STARTS)
+                for part in SEGMENT_SPLIT.split(flat))
+            or any(bash_blocked(code) for code in nested))
 
 
 def blocked(tool, data):

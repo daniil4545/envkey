@@ -178,7 +178,7 @@ class EnvFile:
         """(piece, name) to mask; a multi-line value also by its lines, as output is pumped by lines."""
         return [(piece, line.name) for i, line in enumerate(self.lines)
                 if line.name and line.value and not self.is_public(i)
-                for piece in [line.value, *line.value.split("\n")] if piece]
+                for piece in [line.value, *(part.rstrip("\r") for part in line.value.split("\n"))] if piece]
 
     def find(self, name):
         found = [i for i, line in enumerate(self.lines) if line.name == name]
@@ -194,13 +194,14 @@ class EnvFile:
         if value is None:
             if index is None:
                 raise EnvError(f"{name} is not in the file")
-            value = self.lines[index].value
         else:
             check_value(value)
         if index is not None:
             line = self.lines[index]
-            line.raw = f"{line.prefix}{name}={value}{line.eol}"
-            line.value = value
+            # Without a new value only the mark changes: the line keeps its quotes and lines as written
+            if value is not None:
+                line.raw = f"{line.prefix}{name}={value}{line.eol}"
+                line.value = value
             marked = self.is_public(index)
             if marked and not public:
                 del self.lines[index - 1]
