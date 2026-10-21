@@ -21,17 +21,23 @@ one job. User-facing description - `README.md`.
 | `hooks/hooks.json`, `hooks/guard.py` | PreToolUse guard against direct `.env` access |
 | `.claude-plugin/` | plugin manifest and single-plugin marketplace |
 | `tests/` | tests for the command and the guard |
+| `docs/demo.tape`, `assets/demo.gif` | README demo, recorded with `vhs docs/demo.tape` |
 
 ## Commands
 
 | What | Command |
 |---|---|
 | tests | `python3 -m unittest discover -s tests -v` |
+| lint | `uvx ruff@0.14.0 check .` |
+| validate manifests | `claude plugin validate .` |
 | local plugin run | `claude --plugin-dir .` |
 
 ## Workflow
 
-- Branch `main`, GitHub (private), no CI. Bump `version` in both manifests on release.
+- Branch `main`, GitHub (public), CI in `.github/workflows/ci.yml`: ruff and tests on Linux and macOS.
+- Release: bump `version` in both manifests, add a `## [X.Y.Z] - date` section to `CHANGELOG.md`,
+  tag `vX.Y.Z`. `release.yml` checks the three agree and publishes the section as the release notes.
+- Commits: conventional commits in English. The project is public, so all text is English.
 
 ## Critical invariants
 
