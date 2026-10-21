@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -156,12 +157,14 @@ class EnvkeyTest(unittest.TestCase):
         self.assertNotIn(SECRET, result.stdout + result.stderr)
         self.assertEqual(stat.S_IMODE(os.stat(self.path()).st_mode), 0o600)
 
+    @unittest.skipUnless(sys.platform == "darwin", "the secret dialog exists on macOS only")
     def test_set_secret_without_stdin_uses_dialog(self):
         self.stub_osascript(f"echo {SECRET}")
         result = self.envkey("set", "TOKEN")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.read(), f"TOKEN={SECRET}\n")
 
+    @unittest.skipUnless(sys.platform == "darwin", "the secret dialog exists on macOS only")
     def test_dialog_cancel_leaves_file(self):
         self.write("A=1\n")
         self.stub_osascript("exit 1")
