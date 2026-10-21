@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-21
+## [0.2.0] - 2026-10-21
 
 First public release.
 
@@ -32,5 +32,5 @@ First public release.
   `claude plugin marketplace add daniil4545/envkey`.
 - README with a terminal demo, tests, ruff lint and CI on Linux and macOS.
 
-[Unreleased]: https://github.com/daniil4545/envkey/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/daniil4545/envkey/releases/tag/v0.1.0
+[Unreleased]: https://github.com/daniil4545/envkey/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/daniil4545/envkey/releases/tag/v0.2.0
