@@ -259,7 +259,7 @@ No. The agent runs it. You only type a secret into the dialog when the agent ask
 
 ```sh
 python3 -m unittest discover -s tests -v    # tests
-uvx ruff@0.14.0 check .                     # linter
+make lint                                   # checks (ruff)
 claude plugin validate .                    # plugin and marketplace manifests
 claude --plugin-dir .                       # run Claude Code with the local plugin
 vhs docs/demo.tape                          # re-record the demo
