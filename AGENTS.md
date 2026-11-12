@@ -28,7 +28,7 @@ one job. User-facing description - `README.md`.
 | What | Command |
 |---|---|
 | tests | `python3 -m unittest discover -s tests -v` |
-| lint | `uvx ruff@0.14.0 check .` |
+| lint | `make lint` |
 | validate manifests | `claude plugin validate .` |
 | local plugin run | `claude --plugin-dir .` |
 
